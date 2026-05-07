@@ -11,6 +11,8 @@ wrb
 ```
 
 By default it uses the current git repo root and opens the Wave web block.
+The command starts the browser service in the background and returns the shell,
+similar to `wsh view .`.
 
 In a local Wave shell, `wrb` listens on `127.0.0.1` with a random port.
 
@@ -49,6 +51,12 @@ For local testing without opening Wave:
 
 ```bash
 wrb . --no-open
+```
+
+For foreground debugging:
+
+```bash
+wrb . --foreground
 ```
 
 ## Development

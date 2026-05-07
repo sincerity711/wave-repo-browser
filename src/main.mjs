@@ -33,6 +33,7 @@ function parseArgs(args) {
     publicHost: "",
     mode: "",
     open: true,
+    foreground: false,
     root: "",
   };
 
@@ -40,8 +41,13 @@ function parseArgs(args) {
     const arg = args[index];
     if (arg === "--no-open") {
       options.open = false;
+      options.foreground = true;
     } else if (arg === "--open") {
       options.open = true;
+    } else if (arg === "--foreground") {
+      options.foreground = true;
+    } else if (arg === "--daemon") {
+      options.foreground = false;
     } else if (arg === "--local") {
       options.mode = "local";
     } else if (arg === "--remote") {
@@ -101,6 +107,35 @@ function defaultRoot() {
 
 const ROOT = path.resolve(options.root || defaultRoot());
 const REPO_NAME = path.basename(ROOT);
+
+function shellQuote(value) {
+  return `'${String(value).replace(/'/g, `'\\''`)}'`;
+}
+
+function logPathForRoot() {
+  const slug = `${REPO_NAME}-${ROOT}`.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+  return path.join(process.env.TMPDIR || "/tmp", `wrb-${slug || "repo"}.log`);
+}
+
+function daemonizeIfNeeded() {
+  if (options.foreground) return;
+
+  const childArgs = argv.includes("--foreground") ? [...argv] : [...argv, "--foreground"];
+  const logPath = logPathForRoot();
+  const command = `${shellQuote(process.execPath)} ${childArgs.map(shellQuote).join(" ")} >> ${shellQuote(logPath)} 2>&1`;
+
+  spawn("sh", ["-lc", command], {
+    detached: true,
+    stdio: "ignore",
+    env: process.env,
+  }).unref();
+
+  console.log(`wrb started for ${ROOT}`);
+  console.log(`log: ${logPath}`);
+  process.exit(0);
+}
+
+daemonizeIfNeeded();
 
 let gitStatusCache = new Map();
 let gitStatusAt = 0;
@@ -258,19 +293,38 @@ async function readJson(req) {
 }
 
 function spawnDetached(command, args) {
-  const child = spawn(command, args, {
-    detached: true,
-    stdio: "ignore",
-  });
-  child.unref();
+  try {
+    const child = spawn(command, args, {
+      detached: true,
+      stdio: "ignore",
+    });
+    child.on("error", (err) => {
+      console.error(`Failed to run ${command}: ${err.message || err}`);
+    });
+    child.unref();
+  } catch (err) {
+    console.error(`Failed to run ${command}: ${err.message || err}`);
+  }
+}
+
+function wshCommand() {
+  const home = process.env.HOME || "";
+  const fallback = home ? path.join(home, ".waveterm", "bin", "wsh") : "";
+
+  if (fallback) {
+    const result = spawnSync("test", ["-x", fallback]);
+    if (result.status === 0) return fallback;
+  }
+
+  return "wsh";
 }
 
 function openWithWave(absFile) {
-  spawnDetached("wsh", ["view", absFile]);
+  spawnDetached(wshCommand(), ["view", absFile]);
 }
 
 function openWebInWave(url) {
-  spawnDetached("wsh", ["web", "open", url]);
+  spawnDetached(wshCommand(), ["web", "open", url]);
 }
 
 const HTML = String.raw`
