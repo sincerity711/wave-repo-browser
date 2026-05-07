@@ -79,6 +79,10 @@ const shouldOpen = options.open;
 const DEFAULT_REMOTE_PORT = 17876;
 
 function detectPublicHost() {
+  const conn = process.env.WAVETERM_CONN || "";
+  const connHost = conn.includes("@") ? conn.split("@").pop() : conn;
+  if (connHost && !connHost.includes("/") && connHost !== "local") return connHost;
+
   const route = spawnSync("sh", ["-lc", "ip route get 1.1.1.1 2>/dev/null | awk '{for (i=1; i<NF; i++) if ($i == \"src\") {print $(i+1); exit}}'"], {
     encoding: "utf8",
   });
