@@ -1,0 +1,18 @@
+{
+  "name": "wave-repo-browser",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "wrb": "./dist/wrb"
+  },
+  "scripts": {
+    "embed": "bun scripts/embed-codicons.mjs",
+    "build": "bun run embed && bun build src/main.mjs --compile --outfile dist/wrb",
+    "dev": "bun src/main.mjs . --open",
+    "check": "node --check src/main.mjs && zsh -n scripts/wrb-dev"
+  },
+  "dependencies": {
+    "@vscode/codicons": "0.0.45"
+  }
+}
