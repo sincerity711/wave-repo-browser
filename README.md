@@ -98,6 +98,14 @@ This builds a Linux x64 standalone binary locally with Bun, copies it over SSH, 
 ~/.local/bin/wrb
 ```
 
+The installer resolves the SSH host with `ssh -G` and writes it to the remote
+config so Wave opens the Windows/remote-machine address instead of a WSL NAT
+address. Override it when needed:
+
+```bash
+WRB_PUBLIC_HOST=10.59.147.90 scripts/install-to-remote-wrb ciro@win-wsl
+```
+
 For Linux arm64:
 
 ```bash

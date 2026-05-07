@@ -81,21 +81,31 @@ bun build src/main.mjs --compile --target="$target" --outfile "$outfile"
 remote_tmp="/tmp/wrb-bin-$RANDOM-$$"
 remote_bin_dir="${WRB_REMOTE_BIN_DIR:-\$HOME/.local/bin}"
 remote_install_root="${WRB_REMOTE_INSTALL_ROOT:-\$HOME/.local/share/wave-repo-browser}"
+public_host="${WRB_PUBLIC_HOST:-}"
+
+if [[ -z "$public_host" ]]; then
+  public_host="$(ssh -G "$remote" 2>/dev/null | awk '$1 == "hostname" {print $2; exit}')"
+fi
 
 echo "Copying $outfile to $remote:$remote_tmp"
 scp "$outfile" "$remote:$remote_tmp"
 
 echo "Installing on $remote"
 ssh "$remote" \
-  "WRB_REMOTE_TMP='$remote_tmp' WRB_REMOTE_BIN_DIR='$remote_bin_dir' WRB_REMOTE_INSTALL_ROOT='$remote_install_root' bash -s" <<'EOF'
+  "WRB_REMOTE_TMP='$remote_tmp' WRB_REMOTE_BIN_DIR='$remote_bin_dir' WRB_REMOTE_INSTALL_ROOT='$remote_install_root' WRB_PUBLIC_HOST='$public_host' bash -s" <<'EOF'
 set -euo pipefail
 
 bin_dir="$(eval echo "$WRB_REMOTE_BIN_DIR")"
 install_root="$(eval echo "$WRB_REMOTE_INSTALL_ROOT")"
+config_dir="$HOME/.config/wave-repo-browser"
 
-mkdir -p "$bin_dir" "$install_root/bin"
+mkdir -p "$bin_dir" "$install_root/bin" "$config_dir"
 mv "$WRB_REMOTE_TMP" "$install_root/bin/wrb-bin"
 chmod +x "$install_root/bin/wrb-bin"
+
+if [ -n "${WRB_PUBLIC_HOST:-}" ]; then
+  printf '%s\n' "$WRB_PUBLIC_HOST" > "$config_dir/public-host"
+fi
 
 cat >"$bin_dir/wrb" <<'LAUNCHER'
 #!/usr/bin/env bash
@@ -107,6 +117,10 @@ chmod +x "$bin_dir/wrb"
 
 echo "Installed:"
 echo "  $bin_dir/wrb"
+if [ -n "${WRB_PUBLIC_HOST:-}" ]; then
+  echo "Public host:"
+  echo "  $WRB_PUBLIC_HOST"
+fi
 echo
 if ! printf '%s' ":$PATH:" | grep -q ":$bin_dir:"; then
   echo "Add to PATH if needed:"

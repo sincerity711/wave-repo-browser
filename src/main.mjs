@@ -78,7 +78,22 @@ const mode = options.mode || (isWaveRemote ? "remote" : "local");
 const shouldOpen = options.open;
 const DEFAULT_REMOTE_PORT = 17876;
 
+function configuredPublicHost() {
+  const home = process.env.HOME || "";
+  if (!home) return "";
+
+  const configPath = path.join(home, ".config", "wave-repo-browser", "public-host");
+  try {
+    return String(spawnSync("cat", [configPath], { encoding: "utf8" }).stdout || "").trim();
+  } catch {
+    return "";
+  }
+}
+
 function detectPublicHost() {
+  const configured = configuredPublicHost();
+  if (configured) return configured;
+
   const conn = process.env.WAVETERM_CONN || "";
   const connHost = conn.includes("@") ? conn.split("@").pop() : conn;
   if (connHost && !connHost.includes("/") && connHost !== "local") return connHost;
