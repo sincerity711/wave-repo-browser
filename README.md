@@ -78,26 +78,32 @@ The UI uses VS Code's open-source `@vscode/codicons` package. The build embeds t
 
 ## Remote Install
 
-From the Mac/local project:
+Install to a remote Linux/WSL machine from this local Mac repo:
 
 ```bash
-scripts/package-remote-wrb
+scripts/install-to-remote-wrb ciro@win-wsl
 ```
 
-Then in the Wave remote shell:
-
-```bash
-bash <(wsh file cat wsh://local/~/Documents/Codex/2026-05-07/python-node-js-ui-html-js/scripts/install-remote-wrb)
-```
-
-The installer copies the local source bundle into the remote machine, installs Bun if needed, builds a remote-native executable, and installs:
+This builds a Linux x64 standalone binary locally with Bun, copies it over SSH, and installs:
 
 ```text
 ~/.local/bin/wrb
 ```
 
-If `~/.local/bin` is not on the remote PATH, add:
+For Linux arm64:
+
+```bash
+scripts/install-to-remote-wrb <ssh-host> --target bun-linux-arm64
+```
+
+If `~/.local/bin` is not on the remote PATH, add this on the remote machine:
 
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
+```
+
+Then in the Wave remote shell:
+
+```bash
+wrb
 ```

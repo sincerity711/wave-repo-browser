@@ -9,6 +9,7 @@
   "scripts": {
     "embed": "bun scripts/embed-codicons.mjs",
     "build": "bun run embed && bun build src/main.mjs --compile --outfile dist/wrb",
+    "build:linux-x64": "bun run embed && bun build src/main.mjs --compile --target=bun-linux-x64 --outfile dist/wrb-linux-x64",
     "dev": "bun src/main.mjs . --open",
     "check": "node --check src/main.mjs && zsh -n scripts/wrb-dev"
   },

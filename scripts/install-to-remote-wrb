@@ -1,0 +1,118 @@
+#!/usr/bin/env zsh
+
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage:
+  scripts/install-to-remote-wrb <ssh-host> [--target bun-linux-x64]
+
+Examples:
+  scripts/install-to-remote-wrb ciro@win-wsl
+  scripts/install-to-remote-wrb ciro@win-wsl --target bun-linux-x64
+
+Environment:
+  WRB_REMOTE_BIN_DIR       Default: ~/.local/bin
+  WRB_REMOTE_INSTALL_ROOT  Default: ~/.local/share/wave-repo-browser
+EOF
+}
+
+script_dir="${0:A:h}"
+repo_dir="${script_dir:h}"
+remote=""
+target="bun-linux-x64"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --target)
+      target="${2:-}"
+      shift 2
+      ;;
+    --target=*)
+      target="${1#--target=}"
+      shift
+      ;;
+    -*)
+      echo "Unknown option: $1" >&2
+      usage >&2
+      exit 1
+      ;;
+    *)
+      if [[ -n "$remote" ]]; then
+        echo "Only one ssh host is supported." >&2
+        usage >&2
+        exit 1
+      fi
+      remote="$1"
+      shift
+      ;;
+  esac
+done
+
+if [[ -z "$remote" ]]; then
+  usage >&2
+  exit 1
+fi
+
+case "$target" in
+  bun-linux-x64)
+    outfile="$repo_dir/dist/wrb-linux-x64"
+    ;;
+  bun-linux-arm64)
+    outfile="$repo_dir/dist/wrb-linux-arm64"
+    ;;
+  *)
+    echo "Unsupported target for remote install: $target" >&2
+    echo "Supported: bun-linux-x64, bun-linux-arm64" >&2
+    exit 1
+    ;;
+esac
+
+cd "$repo_dir"
+
+mkdir -p dist
+bun run embed
+bun build src/main.mjs --compile --target="$target" --outfile "$outfile"
+
+remote_tmp="/tmp/wrb-bin-$RANDOM-$$"
+remote_bin_dir="${WRB_REMOTE_BIN_DIR:-\$HOME/.local/bin}"
+remote_install_root="${WRB_REMOTE_INSTALL_ROOT:-\$HOME/.local/share/wave-repo-browser}"
+
+echo "Copying $outfile to $remote:$remote_tmp"
+scp "$outfile" "$remote:$remote_tmp"
+
+echo "Installing on $remote"
+ssh "$remote" \
+  "WRB_REMOTE_TMP='$remote_tmp' WRB_REMOTE_BIN_DIR='$remote_bin_dir' WRB_REMOTE_INSTALL_ROOT='$remote_install_root' bash -s" <<'EOF'
+set -euo pipefail
+
+bin_dir="$(eval echo "$WRB_REMOTE_BIN_DIR")"
+install_root="$(eval echo "$WRB_REMOTE_INSTALL_ROOT")"
+
+mkdir -p "$bin_dir" "$install_root/bin"
+mv "$WRB_REMOTE_TMP" "$install_root/bin/wrb-bin"
+chmod +x "$install_root/bin/wrb-bin"
+
+cat >"$bin_dir/wrb" <<'LAUNCHER'
+#!/usr/bin/env bash
+set -euo pipefail
+exec "$HOME/.local/share/wave-repo-browser/bin/wrb-bin" "$@"
+LAUNCHER
+
+chmod +x "$bin_dir/wrb"
+
+echo "Installed:"
+echo "  $bin_dir/wrb"
+echo
+if ! printf '%s' ":$PATH:" | grep -q ":$bin_dir:"; then
+  echo "Add to PATH if needed:"
+  echo "  export PATH=\"$bin_dir:\$PATH\""
+  echo
+fi
+echo "Try in the Wave remote shell:"
+echo "  wrb"
+EOF
