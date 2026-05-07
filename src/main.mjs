@@ -35,6 +35,7 @@ function parseArgs(args) {
     open: true,
     foreground: false,
     root: "",
+    service: false,
   };
 
   for (let index = 0; index < args.length; index += 1) {
@@ -48,6 +49,8 @@ function parseArgs(args) {
       options.foreground = true;
     } else if (arg === "--daemon") {
       options.foreground = false;
+    } else if (arg === "--service") {
+      options.service = true;
     } else if (arg === "--local") {
       options.mode = "local";
     } else if (arg === "--remote") {
@@ -117,31 +120,103 @@ const listenHost = options.host || (mode === "remote" ? "0.0.0.0" : "127.0.0.1")
 const listenPort = Number(options.port || (mode === "remote" ? DEFAULT_REMOTE_PORT : 0));
 const publicHost = options.publicHost || (mode === "remote" ? detectPublicHost() : "127.0.0.1");
 
-function defaultRoot() {
-  const result = spawnSync("git", ["-C", process.cwd(), "rev-parse", "--show-toplevel"], {
-    encoding: "utf8",
-  });
-  return result.status === 0 ? result.stdout.trim() : process.cwd();
-}
-
-const ROOT = path.resolve(options.root || defaultRoot());
-const REPO_NAME = path.basename(ROOT);
+const BROWSE_ROOT = path.resolve(options.root || process.cwd());
 
 function shellQuote(value) {
   return `'${String(value).replace(/'/g, `'\\''`)}'`;
 }
 
-function logPathForRoot() {
-  const slug = `${REPO_NAME}-${ROOT}`.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
-  return path.join(process.env.TMPDIR || "/tmp", `wrb-${slug || "repo"}.log`);
+function runtimeDir() {
+  const base = process.env.XDG_RUNTIME_DIR || process.env.TMPDIR || "/tmp";
+  return path.join(base, "wave-repo-browser");
 }
 
-function daemonizeIfNeeded() {
-  if (options.foreground) return;
+function statePath() {
+  const host = listenHost.replace(/[^a-zA-Z0-9._-]+/g, "-") || "host";
+  return path.join(runtimeDir(), `service-${mode}-${host}-${listenPort || "auto"}.json`);
+}
 
-  const childArgs = argv.includes("--foreground") ? [...argv] : [...argv, "--foreground"];
-  const logPath = logPathForRoot();
-  const command = `${shellQuote(process.execPath)} ${childArgs.map(shellQuote).join(" ")} >> ${shellQuote(logPath)} 2>&1`;
+function logPath() {
+  return path.join(runtimeDir(), `wrb-service-${mode}.log`);
+}
+
+function localServiceUrl(port) {
+  return `http://127.0.0.1:${port}`;
+}
+
+function publicServiceUrl(port) {
+  return `http://${publicHost}:${port}`;
+}
+
+function browseUrl(baseUrl, root = BROWSE_ROOT) {
+  return `${baseUrl}/?root=${encodeURIComponent(root)}`;
+}
+
+async function readServiceState() {
+  try {
+    return JSON.parse(await fs.readFile(statePath(), "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+async function writeServiceState(port) {
+  await fs.mkdir(runtimeDir(), { recursive: true });
+  await fs.writeFile(
+    statePath(),
+    JSON.stringify(
+      {
+        mode,
+        listenHost,
+        publicHost,
+        port,
+        pid: process.pid,
+        startedAt: new Date().toISOString(),
+      },
+      null,
+      2,
+    ),
+  );
+}
+
+async function existingServiceBaseUrl() {
+  const state = await readServiceState();
+  const candidatePort = state?.port || (listenPort > 0 ? listenPort : 0);
+  if (!candidatePort) return "";
+
+  try {
+    const res = await fetch(`${localServiceUrl(candidatePort)}/api/health`);
+    if (!res.ok) return "";
+
+    const data = await res.json();
+    if (data.name !== "wave-repo-browser") return "";
+
+    return publicServiceUrl(candidatePort);
+  } catch {
+    return "";
+  }
+}
+
+async function daemonizeIfNeeded() {
+  if (options.foreground || options.service) return;
+
+  const existingBaseUrl = await existingServiceBaseUrl();
+  if (existingBaseUrl) {
+    if (shouldOpen) openWebInWave(browseUrl(existingBaseUrl));
+    console.log(`wrb opened ${BROWSE_ROOT}`);
+    console.log(`URL: ${browseUrl(existingBaseUrl)}`);
+    process.exit(0);
+  }
+
+  const childArgs = [];
+  if (options.mode) childArgs.push(`--${options.mode}`);
+  if (options.host) childArgs.push("--host", options.host);
+  if (options.port) childArgs.push("--port", options.port);
+  if (options.publicHost) childArgs.push("--public-host", options.publicHost);
+  childArgs.push("--foreground", "--service", "--no-open");
+  const serviceLogPath = logPath();
+  await fs.mkdir(runtimeDir(), { recursive: true });
+  const command = `${shellQuote(process.execPath)} ${childArgs.map(shellQuote).join(" ")} >> ${shellQuote(serviceLogPath)} 2>&1`;
 
   spawn("sh", ["-lc", command], {
     detached: true,
@@ -149,26 +224,35 @@ function daemonizeIfNeeded() {
     env: process.env,
   }).unref();
 
-  console.log(`wrb started for ${ROOT}`);
-  console.log(`log: ${logPath}`);
+  for (let attempt = 0; attempt < 150; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const startedBaseUrl = await existingServiceBaseUrl();
+    if (startedBaseUrl) {
+      if (shouldOpen) openWebInWave(browseUrl(startedBaseUrl));
+      console.log(`wrb opened ${BROWSE_ROOT}`);
+      console.log(`URL: ${browseUrl(startedBaseUrl)}`);
+      process.exit(0);
+    }
+  }
+
+  console.log("wrb service starting");
+  console.log(`browse: ${BROWSE_ROOT}`);
+  console.log(`log: ${serviceLogPath}`);
   process.exit(0);
 }
 
-daemonizeIfNeeded();
+await daemonizeIfNeeded();
 
-let gitStatusCache = new Map();
-let gitStatusAt = 0;
-let isGitRepoCache = null;
-
-function isInsideRoot(absPath) {
-  const rel = path.relative(ROOT, absPath);
+function isInsideRoot(root, absPath) {
+  const rel = path.relative(root, absPath);
   return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
 }
 
-function safeResolve(relPath = ".") {
-  const absPath = path.resolve(ROOT, relPath || ".");
-  if (!isInsideRoot(absPath)) {
-    throw new Error("Path escapes repo root");
+function safeResolve(root, relPath = ".") {
+  const absRoot = path.resolve(root || ".");
+  const absPath = path.resolve(absRoot, relPath || ".");
+  if (!isInsideRoot(absRoot, absPath)) {
+    throw new Error("Path escapes browse root");
   }
   return absPath;
 }
@@ -183,13 +267,38 @@ function extensionOf(name) {
   return path.extname(name).replace(/^\./, "").toLowerCase();
 }
 
-function isGitRepo() {
-  if (isGitRepoCache !== null) return isGitRepoCache;
-  const result = spawnSync("git", ["-C", ROOT, "rev-parse", "--is-inside-work-tree"], {
+const gitStateByRoot = new Map();
+
+function gitState(root) {
+  const absRoot = path.resolve(root || ".");
+  let state = gitStateByRoot.get(absRoot);
+  if (!state) {
+    state = {
+      statusCache: new Map(),
+      statusAt: 0,
+      isRepo: null,
+      repoRoot: "",
+    };
+    gitStateByRoot.set(absRoot, state);
+  }
+  return state;
+}
+
+function isGitRepo(root) {
+  const state = gitState(root);
+  if (state.isRepo !== null) return state.isRepo;
+
+  const result = spawnSync("git", ["-C", root, "rev-parse", "--is-inside-work-tree"], {
     encoding: "utf8",
   });
-  isGitRepoCache = result.status === 0 && result.stdout.trim() === "true";
-  return isGitRepoCache;
+  state.isRepo = result.status === 0 && result.stdout.trim() === "true";
+  if (state.isRepo) {
+    const topLevel = spawnSync("git", ["-C", root, "rev-parse", "--show-toplevel"], {
+      encoding: "utf8",
+    });
+    state.repoRoot = topLevel.status === 0 ? topLevel.stdout.trim() : root;
+  }
+  return state.isRepo;
 }
 
 function parseGitStatus(output) {
@@ -224,30 +333,35 @@ function gitStatusKind(code) {
   return code.trim();
 }
 
-function refreshGitStatus(force = false) {
-  if (!isGitRepo()) return new Map();
-  const now = Date.now();
-  if (!force && now - gitStatusAt < 1200) return gitStatusCache;
+function refreshGitStatus(root, force = false) {
+  if (!isGitRepo(root)) return new Map();
 
-  const result = spawnSync("git", ["-C", ROOT, "status", "--porcelain=v1", "-z"], {
+  const state = gitState(root);
+  const now = Date.now();
+  if (!force && now - state.statusAt < 1200) return state.statusCache;
+
+  const result = spawnSync("git", ["-C", state.repoRoot || root, "status", "--porcelain=v1", "-z"], {
     encoding: "utf8",
     maxBuffer: 1024 * 1024 * 8,
   });
 
-  gitStatusAt = now;
-  gitStatusCache = result.status === 0 ? parseGitStatus(result.stdout) : new Map();
-  return gitStatusCache;
+  state.statusAt = now;
+  state.statusCache = result.status === 0 ? parseGitStatus(result.stdout) : new Map();
+  return state.statusCache;
 }
 
-async function listDir(relPath = ".", forceGit = false) {
-  const absDir = safeResolve(relPath);
-  const stat = await fs.lstat(absDir);
+async function listDir(root, relPath = ".", forceGit = false) {
+  const absRoot = path.resolve(root || ".");
+  const repoName = path.basename(absRoot);
+  const absDir = safeResolve(absRoot, relPath);
+  const stat = await fs.stat(absDir);
 
   if (!stat.isDirectory()) {
     throw new Error("Not a directory");
   }
 
-  const gitStatus = refreshGitStatus(forceGit);
+  const gitStatus = refreshGitStatus(absRoot, forceGit);
+  const state = gitState(absRoot);
   const entries = await fs.readdir(absDir, { withFileTypes: true });
   const children = [];
 
@@ -256,10 +370,11 @@ async function listDir(relPath = ".", forceGit = false) {
     if (entry.isSymbolicLink()) continue;
 
     const abs = path.join(absDir, entry.name);
-    const rel = path.relative(ROOT, abs);
+    const rel = path.relative(absRoot, abs);
     const itemStat = await fs.lstat(abs);
     const isDir = entry.isDirectory();
-    const git = gitStatusKind(gitStatus.get(rel));
+    const gitRel = state.repoRoot ? path.relative(state.repoRoot, abs) : rel;
+    const git = gitStatusKind(gitStatus.get(gitRel));
 
     children.push({
       name: entry.name,
@@ -279,10 +394,10 @@ async function listDir(relPath = ".", forceGit = false) {
   });
 
   return {
-    root: ROOT,
-    repoName: REPO_NAME,
+    root: absRoot,
+    repoName,
     path: relPath || ".",
-    git: isGitRepo(),
+    git: isGitRepo(absRoot),
     children,
   };
 }
@@ -652,6 +767,57 @@ const HTML = String.raw`
       white-space: nowrap;
       font-size: 12px;
     }
+
+    #contextMenu {
+      position: fixed;
+      z-index: 20;
+      min-width: 178px;
+      padding: 4px;
+      border: 1px solid #3f3f3f;
+      border-radius: 6px;
+      background: #252526;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, .35);
+      display: none;
+    }
+
+    #contextMenu.open {
+      display: block;
+    }
+
+    .menu-item {
+      width: 100%;
+      height: 28px;
+      display: grid;
+      grid-template-columns: 20px minmax(0, 1fr);
+      align-items: center;
+      gap: 8px;
+      border: 0;
+      border-radius: 4px;
+      background: transparent;
+      color: var(--soft-text);
+      font: inherit;
+      font-size: 12px;
+      text-align: left;
+      cursor: default;
+    }
+
+    .menu-item:hover,
+    .menu-item:focus {
+      outline: none;
+      background: var(--hover);
+      color: var(--text);
+    }
+
+    .menu-item .codicon {
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .menu-separator {
+      height: 1px;
+      margin: 4px 6px;
+      background: var(--line);
+    }
   </style>
 </head>
 <body>
@@ -670,6 +836,7 @@ const HTML = String.raw`
     <div id="tree"></div>
     <div id="status">Enter opens files. Right/Left expands and collapses folders.</div>
   </div>
+  <div id="contextMenu" role="menu" aria-hidden="true"></div>
 
   <script>
     const tree = document.getElementById("tree");
@@ -680,10 +847,13 @@ const HTML = String.raw`
     const refresh = document.getElementById("refresh");
     const collapseAll = document.getElementById("collapseAll");
     const clearFilter = document.getElementById("clearFilter");
+    const contextMenu = document.getElementById("contextMenu");
 
     let rows = [];
     let selected = null;
+    let contextRow = null;
     let rootPath = "";
+    const initialRoot = new URLSearchParams(window.location.search).get("root") || "";
 
     async function getJson(url) {
       const res = await fetch(url);
@@ -718,6 +888,77 @@ const HTML = String.raw`
       selected = row;
       row.scrollIntoView({ block: "nearest" });
       setStatus(row.dataset.absPath || "");
+    }
+
+    function closeContextMenu() {
+      contextMenu.classList.remove("open");
+      contextMenu.setAttribute("aria-hidden", "true");
+      contextMenu.innerHTML = "";
+      contextRow = null;
+    }
+
+    function menuButton(label, icon, action) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "menu-item";
+      button.setAttribute("role", "menuitem");
+      button.innerHTML = '<span class="codicon ' + icon + '"></span><span>' + label + '</span>';
+      button.onclick = async () => {
+        closeContextMenu();
+        await action();
+      };
+      return button;
+    }
+
+    function menuSeparator() {
+      const separator = document.createElement("div");
+      separator.className = "menu-separator";
+      separator.setAttribute("role", "separator");
+      return separator;
+    }
+
+    function positionContextMenu(x, y) {
+      contextMenu.style.left = "0px";
+      contextMenu.style.top = "0px";
+      contextMenu.classList.add("open");
+      contextMenu.setAttribute("aria-hidden", "false");
+
+      const rect = contextMenu.getBoundingClientRect();
+      const left = Math.min(x, window.innerWidth - rect.width - 6);
+      const top = Math.min(y, window.innerHeight - rect.height - 6);
+      contextMenu.style.left = Math.max(6, left) + "px";
+      contextMenu.style.top = Math.max(6, top) + "px";
+    }
+
+    function showContextMenu(ev, row, entry) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      selectRow(row);
+      closeContextMenu();
+      contextRow = row;
+
+      if (entry.isDir) {
+        const isOpen = row.dataset.open === "true";
+        contextMenu.appendChild(menuButton(
+          isOpen ? "Collapse folder" : "Expand folder",
+          isOpen ? "codicon-chevron-up" : "codicon-chevron-down",
+          async () => toggleDir(row, entry, Number(row.dataset.depth || 0)),
+        ));
+      } else {
+        contextMenu.appendChild(menuButton("Open in Wave", "codicon-go-to-file", async () => openFile(row, entry)));
+      }
+
+      contextMenu.appendChild(menuButton("Copy path", "codicon-copy", async () => {
+        await navigator.clipboard.writeText(row.dataset.absPath || "");
+        setStatus("Copied: " + row.dataset.absPath);
+      }));
+      contextMenu.appendChild(menuSeparator());
+      contextMenu.appendChild(menuButton("Refresh", "codicon-refresh", async () => init(true)));
+      contextMenu.appendChild(menuButton("Collapse all", "codicon-collapse-all", async () => collapseLoadedTree()));
+
+      positionContextMenu(ev.clientX, ev.clientY);
+      const firstItem = contextMenu.querySelector(".menu-item");
+      if (firstItem) firstItem.focus();
     }
 
     function codiconFor(entry) {
@@ -811,13 +1052,22 @@ const HTML = String.raw`
       if (entry.isDir) {
         row.dataset.open = "false";
         row.onclick = async () => {
+          closeContextMenu();
           selectRow(row);
           await toggleDir(row, entry, depth);
         };
       } else {
-        row.onclick = () => selectRow(row);
+        row.onclick = () => {
+          closeContextMenu();
+          selectRow(row);
+        };
         row.ondblclick = async () => openFile(row, entry);
       }
+
+      row.oncontextmenu = (ev) => showContextMenu(ev, row, entry);
+      row.onpointerdown = (ev) => {
+        if (ev.button === 2) selectRow(row);
+      };
 
       row.onkeydown = async (ev) => {
         if (ev.key === "Enter") {
@@ -835,7 +1085,7 @@ const HTML = String.raw`
       const old = row.querySelector(".meta").textContent;
       row.querySelector(".meta").textContent = "opening";
       try {
-        await postJson("/api/open", { path: entry.path });
+        await postJson("/api/open", { root: rootPath, path: entry.path });
         setStatus("Opened in Wave: " + entry.absPath);
       } catch (err) {
         alert(String(err));
@@ -871,7 +1121,9 @@ const HTML = String.raw`
       row.after(box);
 
       try {
-        const data = await getJson("/api/list?dir=" + encodeURIComponent(entry.path));
+        const data = await getJson(
+          "/api/list?root=" + encodeURIComponent(rootPath) + "&dir=" + encodeURIComponent(entry.path),
+        );
         box.innerHTML = "";
 
         if (!data.children.length) {
@@ -933,22 +1185,50 @@ const HTML = String.raw`
 
     filter.addEventListener("input", applyFilter);
 
+    tree.addEventListener("contextmenu", (ev) => {
+      ev.preventDefault();
+      closeContextMenu();
+      contextMenu.appendChild(menuButton("Refresh", "codicon-refresh", async () => init(true)));
+      contextMenu.appendChild(menuButton("Collapse all", "codicon-collapse-all", async () => collapseLoadedTree()));
+      positionContextMenu(ev.clientX, ev.clientY);
+    });
+
+    document.addEventListener("pointerdown", (ev) => {
+      if (!contextMenu.contains(ev.target)) closeContextMenu();
+    });
+
     clearFilter.onclick = () => {
+      closeContextMenu();
       filter.value = "";
       applyFilter();
       filter.focus();
     };
 
     copyPath.onclick = async () => {
+      closeContextMenu();
       if (!selected) return;
       await navigator.clipboard.writeText(selected.dataset.absPath || "");
       setStatus("Copied: " + selected.dataset.absPath);
     };
 
-    refresh.onclick = () => init(true);
-    collapseAll.onclick = collapseLoadedTree;
+    refresh.onclick = () => {
+      closeContextMenu();
+      init(true);
+    };
+    collapseAll.onclick = () => {
+      closeContextMenu();
+      collapseLoadedTree();
+    };
 
     document.addEventListener("keydown", async (ev) => {
+      if (ev.key === "Escape" && contextMenu.classList.contains("open")) {
+        ev.preventDefault();
+        const rowToFocus = contextRow;
+        closeContextMenu();
+        if (rowToFocus) rowToFocus.focus();
+        return;
+      }
+
       if (ev.target === filter) {
         if (ev.key === "Escape") {
           filter.blur();
@@ -981,7 +1261,10 @@ const HTML = String.raw`
     });
 
     async function init(forceGit = false) {
-      const data = await getJson("/api/list?dir=&git=" + (forceGit ? "1" : "0"));
+      const requestedRoot = rootPath || initialRoot;
+      const data = await getJson(
+        "/api/list?root=" + encodeURIComponent(requestedRoot) + "&dir=&git=" + (forceGit ? "1" : "0"),
+      );
       rootPath = data.root;
       repo.textContent = data.repoName || data.root;
       repo.title = data.root;
@@ -1014,15 +1297,23 @@ const server = http.createServer(async (req, res) => {
       return sendHtml(res, HTML);
     }
 
+    if (req.method === "GET" && url.pathname === "/api/health") {
+      return sendJson(res, 200, {
+        name: "wave-repo-browser",
+        mode,
+      });
+    }
+
     if (req.method === "GET" && url.pathname === "/api/list") {
+      const root = url.searchParams.get("root") || process.cwd();
       const dir = url.searchParams.get("dir") || ".";
       const forceGit = url.searchParams.get("git") === "1";
-      return sendJson(res, 200, await listDir(dir, forceGit));
+      return sendJson(res, 200, await listDir(root, dir, forceGit));
     }
 
     if (req.method === "POST" && url.pathname === "/api/open") {
       const payload = await readJson(req);
-      const absFile = safeResolve(payload.path || "");
+      const absFile = safeResolve(payload.root || process.cwd(), payload.path || "");
       const stat = await fs.lstat(absFile);
 
       if (!stat.isFile()) {
@@ -1050,11 +1341,11 @@ server.on("error", (err) => {
   process.exit(1);
 });
 
-server.listen(listenPort, listenHost, () => {
+server.listen(listenPort, listenHost, async () => {
   const addr = server.address();
-  const url = "http://" + publicHost + ":" + addr.port;
+  const url = publicServiceUrl(addr.port);
 
-  console.log("Repo:", ROOT);
+  await writeServiceState(addr.port);
   console.log("Mode:", mode);
   console.log("Listen:", listenHost + ":" + addr.port);
   console.log("URL:", url);
@@ -1063,6 +1354,6 @@ server.listen(listenPort, listenHost, () => {
   }
 
   if (shouldOpen) {
-    openWebInWave(url);
+    openWebInWave(browseUrl(url));
   }
 });

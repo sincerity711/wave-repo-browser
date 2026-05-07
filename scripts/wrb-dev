@@ -2,5 +2,4 @@
 
 set -euo pipefail
 
-root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
-bun src/main.mjs "$root" --open
+bun src/main.mjs --open

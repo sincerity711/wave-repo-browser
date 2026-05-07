@@ -10,9 +10,11 @@ It is a small Wave companion for Claude Code sessions. Run it inside a repo and 
 wrb
 ```
 
-By default it uses the current git repo root and opens the Wave web block.
-The command starts the browser service in the background and returns the shell,
-similar to `wsh view .`.
+By default it browses the current working directory and opens the Wave web block.
+The command starts a reusable browser service in the background when needed and
+returns the shell, similar to `wsh view .`. The service is not tied to one
+folder; each `wrb` invocation opens the service with that shell's current
+directory as the browse root.
 
 In a local Wave shell, `wrb` listens on `127.0.0.1` with a random port.
 
@@ -34,7 +36,7 @@ and opens:
 http://<auto-detected-remote-ip>:17876
 ```
 
-To point at a specific directory:
+To browse a specific directory:
 
 ```bash
 wrb /path/to/repo
@@ -50,13 +52,13 @@ wrb --local --port 0
 For local testing without opening Wave:
 
 ```bash
-wrb . --no-open
+wrb --no-open
 ```
 
 For foreground debugging:
 
 ```bash
-wrb . --foreground
+wrb --foreground
 ```
 
 ## Development
