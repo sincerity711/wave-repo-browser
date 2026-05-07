@@ -73,17 +73,17 @@ const shouldOpen = options.open;
 const DEFAULT_REMOTE_PORT = 17876;
 
 function detectPublicHost() {
-  const route = spawnSync("sh", ["-lc", "ip route get 1.1.1.1 2>/dev/null | awk '{print $7; exit}'"], {
+  const route = spawnSync("sh", ["-lc", "ip route get 1.1.1.1 2>/dev/null | awk '{for (i=1; i<NF; i++) if ($i == \"src\") {print $(i+1); exit}}'"], {
     encoding: "utf8",
   });
   const routeHost = route.stdout.trim();
-  if (route.status === 0 && routeHost) return routeHost;
+  if (route.status === 0 && /^\d{1,3}(\.\d{1,3}){3}$/.test(routeHost)) return routeHost;
 
-  const hostname = spawnSync("sh", ["-lc", "hostname -I 2>/dev/null | awk '{print $1; exit}'"], {
+  const hostname = spawnSync("sh", ["-lc", "hostname -I 2>/dev/null | tr ' ' '\\n' | awk '/^[0-9]+(\\.[0-9]+){3}$/ {print; exit}'"], {
     encoding: "utf8",
   });
   const hostnameHost = hostname.stdout.trim();
-  if (hostname.status === 0 && hostnameHost) return hostnameHost;
+  if (hostname.status === 0 && /^\d{1,3}(\.\d{1,3}){3}$/.test(hostnameHost)) return hostnameHost;
 
   return "127.0.0.1";
 }
