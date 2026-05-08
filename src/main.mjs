@@ -3,6 +3,7 @@
 import http from "node:http";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import { CODICON_CSS } from "./codicons-embedded.mjs";
 
@@ -79,7 +80,7 @@ const options = parseArgs(argv);
 const isWaveRemote = Boolean(process.env.WAVETERM_CONN);
 const mode = options.mode || (isWaveRemote ? "remote" : "local");
 const shouldOpen = options.open;
-const DEFAULT_REMOTE_PORT = 17876;
+const DEFAULT_PORT = 17876;
 
 function configuredPublicHost() {
   const home = process.env.HOME || "";
@@ -91,6 +92,15 @@ function configuredPublicHost() {
   } catch {
     return "";
   }
+}
+
+function firstExecutable(paths) {
+  for (const candidate of paths.filter(Boolean)) {
+    const result = spawnSync("test", ["-x", candidate]);
+    if (result.status === 0) return candidate;
+  }
+
+  return "";
 }
 
 function detectPublicHost() {
@@ -117,7 +127,7 @@ function detectPublicHost() {
 }
 
 const listenHost = options.host || (mode === "remote" ? "0.0.0.0" : "127.0.0.1");
-const listenPort = Number(options.port || (mode === "remote" ? DEFAULT_REMOTE_PORT : 0));
+const listenPort = Number(options.port || DEFAULT_PORT);
 const publicHost = options.publicHost || (mode === "remote" ? detectPublicHost() : "127.0.0.1");
 
 const BROWSE_ROOT = path.resolve(options.root || process.cwd());
@@ -148,8 +158,42 @@ function publicServiceUrl(port) {
   return `http://${publicHost}:${port}`;
 }
 
-function browseUrl(baseUrl, root = BROWSE_ROOT) {
-  return `${baseUrl}/?root=${encodeURIComponent(root)}`;
+function browseUrl(baseUrl, root = BROWSE_ROOT, sessionId = "") {
+  const url = new URL(baseUrl);
+  url.pathname = "/";
+  url.searchParams.set("root", root);
+  if (sessionId) url.searchParams.set("session", sessionId);
+  return url.toString();
+}
+
+function currentWaveEnv() {
+  const env = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (key.startsWith("WAVETERM_") && value) env[key] = value;
+  }
+  return env;
+}
+
+async function registerWaveSession(baseUrl) {
+  const waveEnv = currentWaveEnv();
+  if (!waveEnv.WAVETERM_JWT) return "";
+
+  try {
+    const port = Number(new URL(baseUrl).port);
+    if (!port) return "";
+
+    const res = await fetch(`${localServiceUrl(port)}/api/session`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ env: waveEnv }),
+    });
+    if (!res.ok) return "";
+
+    const data = await res.json();
+    return data.session || "";
+  } catch {
+    return "";
+  }
 }
 
 async function readServiceState() {
@@ -179,6 +223,74 @@ async function writeServiceState(port) {
   );
 }
 
+function processCommand(pid) {
+  const result = spawnSync("ps", ["-p", String(pid), "-o", "command="], {
+    encoding: "utf8",
+  });
+  return result.status === 0 ? result.stdout.trim() : "";
+}
+
+function looksLikeWrbProcess(command) {
+  return /(^|[/ ])wrb($|[ ])/.test(command) || command.includes("wrb-bin") || command.includes("wave-repo-browser");
+}
+
+function killIfWrb(pid, reason, signal = "SIGTERM") {
+  if (!pid || Number(pid) === process.pid) return false;
+
+  const command = processCommand(pid);
+  if (!command || !looksLikeWrbProcess(command)) return false;
+
+  try {
+    process.kill(Number(pid), signal);
+    console.log(`Stopped old wrb process ${pid}${reason ? ` (${reason})` : ""}`);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function listenerPids(port) {
+  const lsof = spawnSync("lsof", ["-ti", `-iTCP:${port}`, "-sTCP:LISTEN"], {
+    encoding: "utf8",
+  });
+  if (lsof.status === 0) {
+    return lsof.stdout
+      .split(/\s+/)
+      .map((value) => Number(value))
+      .filter(Boolean);
+  }
+
+  const fuser = spawnSync("fuser", ["-n", "tcp", String(port)], {
+    encoding: "utf8",
+  });
+  if (fuser.status !== 0) return [];
+  return `${fuser.stdout}\n${fuser.stderr}`
+    .split(/\s+/)
+    .map((value) => Number(value))
+    .filter(Boolean);
+}
+
+async function cleanupExistingService() {
+  const state = await readServiceState();
+  if (state?.pid) killIfWrb(state.pid, "state file");
+
+  for (const pid of listenerPids(listenPort)) {
+    killIfWrb(pid, `port ${listenPort}`);
+  }
+
+  try {
+    await fs.rm(statePath(), { force: true });
+  } catch {
+    // Best-effort cleanup; startup will still fail clearly if the port remains busy.
+  }
+
+  await new Promise((resolve) => setTimeout(resolve, 200));
+
+  for (const pid of listenerPids(listenPort)) {
+    killIfWrb(pid, `port ${listenPort}`, "SIGKILL");
+  }
+}
+
 async function existingServiceBaseUrl() {
   const state = await readServiceState();
   const candidatePort = state?.port || (listenPort > 0 ? listenPort : 0);
@@ -200,13 +312,7 @@ async function existingServiceBaseUrl() {
 async function daemonizeIfNeeded() {
   if (options.foreground || options.service) return;
 
-  const existingBaseUrl = await existingServiceBaseUrl();
-  if (existingBaseUrl) {
-    if (shouldOpen) openWebInWave(browseUrl(existingBaseUrl));
-    console.log(`wrb opened ${BROWSE_ROOT}`);
-    console.log(`URL: ${browseUrl(existingBaseUrl)}`);
-    process.exit(0);
-  }
+  await cleanupExistingService();
 
   const childArgs = [];
   if (options.mode) childArgs.push(`--${options.mode}`);
@@ -228,9 +334,11 @@ async function daemonizeIfNeeded() {
     await new Promise((resolve) => setTimeout(resolve, 100));
     const startedBaseUrl = await existingServiceBaseUrl();
     if (startedBaseUrl) {
-      if (shouldOpen) openWebInWave(browseUrl(startedBaseUrl));
+      const sessionId = await registerWaveSession(startedBaseUrl);
+      const url = browseUrl(startedBaseUrl, BROWSE_ROOT, sessionId);
+      if (shouldOpen) openWebInWave(url);
       console.log(`wrb opened ${BROWSE_ROOT}`);
-      console.log(`URL: ${browseUrl(startedBaseUrl)}`);
+      console.log(`URL: ${url}`);
       process.exit(0);
     }
   }
@@ -426,11 +534,12 @@ async function readJson(req) {
   return body ? JSON.parse(body) : {};
 }
 
-function spawnDetached(command, args) {
+function spawnDetached(command, args, env = process.env) {
   try {
     const child = spawn(command, args, {
       detached: true,
       stdio: "ignore",
+      env,
     });
     child.on("error", (err) => {
       console.error(`Failed to run ${command}: ${err.message || err}`);
@@ -441,20 +550,46 @@ function spawnDetached(command, args) {
   }
 }
 
-function wshCommand() {
-  const home = process.env.HOME || "";
-  const fallback = home ? path.join(home, ".waveterm", "bin", "wsh") : "";
+function runCommand(command, args, env = process.env) {
+  return new Promise((resolve) => {
+    const child = spawn(command, args, {
+      env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
 
-  if (fallback) {
-    const result = spawnSync("test", ["-x", fallback]);
-    if (result.status === 0) return fallback;
-  }
-
-  return "wsh";
+    child.stdout.on("data", (chunk) => {
+      stdout += String(chunk);
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += String(chunk);
+    });
+    child.on("error", (err) => {
+      resolve({ status: -1, stdout, stderr: String(err.message || err) });
+    });
+    child.on("close", (status) => {
+      resolve({ status: status ?? 0, stdout, stderr });
+    });
+  });
 }
 
-function openWithWave(absFile) {
-  spawnDetached(wshCommand(), ["view", absFile]);
+function wshCommand() {
+  const home = process.env.HOME || "";
+  return (
+    firstExecutable([
+      home ? path.join(home, "Library", "Application Support", "waveterm", "bin", "wsh") : "",
+      home ? path.join(home, ".waveterm", "bin", "wsh") : "",
+    ]) || "wsh"
+  );
+}
+
+async function openWithWave(absFile, waveEnv = {}) {
+  const result = await runCommand(wshCommand(), ["view", absFile], { ...process.env, ...waveEnv });
+  if (result.status !== 0) {
+    const message = (result.stderr || result.stdout || `wsh exited with status ${result.status}`).trim();
+    throw new Error(message);
+  }
 }
 
 function openWebInWave(url) {
@@ -853,7 +988,9 @@ const HTML = String.raw`
     let selected = null;
     let contextRow = null;
     let rootPath = "";
-    const initialRoot = new URLSearchParams(window.location.search).get("root") || "";
+    const initialParams = new URLSearchParams(window.location.search);
+    const initialRoot = initialParams.get("root") || "";
+    const sessionId = initialParams.get("session") || "";
 
     async function getJson(url) {
       const res = await fetch(url);
@@ -1085,7 +1222,7 @@ const HTML = String.raw`
       const old = row.querySelector(".meta").textContent;
       row.querySelector(".meta").textContent = "opening";
       try {
-        await postJson("/api/open", { root: rootPath, path: entry.path });
+        await postJson("/api/open", { root: rootPath, path: entry.path, session: sessionId });
         setStatus("Opened in Wave: " + entry.absPath);
       } catch (err) {
         alert(String(err));
@@ -1289,6 +1426,17 @@ const HTML = String.raw`
 </html>
 `;
 
+const waveSessions = new Map();
+
+function createWaveSession(env) {
+  const session = randomUUID();
+  waveSessions.set(session, {
+    env,
+    createdAt: Date.now(),
+  });
+  return session;
+}
+
 const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url, "http://127.0.0.1");
@@ -1302,6 +1450,21 @@ const server = http.createServer(async (req, res) => {
         name: "wave-repo-browser",
         mode,
       });
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/session") {
+      const remote = req.socket.remoteAddress || "";
+      if (!["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(remote)) {
+        return sendJson(res, 403, { error: "Session registration is only allowed locally" });
+      }
+
+      const payload = await readJson(req);
+      const env = payload.env && typeof payload.env === "object" ? payload.env : {};
+      if (!env.WAVETERM_JWT) {
+        return sendJson(res, 400, { error: "Missing Wave session" });
+      }
+
+      return sendJson(res, 200, { session: createWaveSession(env) });
     }
 
     if (req.method === "GET" && url.pathname === "/api/list") {
@@ -1320,7 +1483,13 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, 400, { error: "Not a file" });
       }
 
-      openWithWave(absFile);
+      const session = waveSessions.get(payload.session || "");
+      const waveEnv = session?.env || currentWaveEnv();
+      if (!waveEnv.WAVETERM_JWT) {
+        return sendJson(res, 409, { error: "Missing Wave session. Reopen WRB from a Wave terminal and try again." });
+      }
+
+      await openWithWave(absFile, waveEnv);
       return sendJson(res, 200, { ok: true });
     }
 
@@ -1354,6 +1523,7 @@ server.listen(listenPort, listenHost, async () => {
   }
 
   if (shouldOpen) {
-    openWebInWave(browseUrl(url));
+    const sessionId = currentWaveEnv().WAVETERM_JWT ? createWaveSession(currentWaveEnv()) : "";
+    openWebInWave(browseUrl(url, BROWSE_ROOT, sessionId));
   }
 });

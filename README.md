@@ -11,12 +11,14 @@ wrb
 ```
 
 By default it browses the current working directory and opens the Wave web block.
-The command starts a reusable browser service in the background when needed and
-returns the shell, similar to `wsh view .`. The service is not tied to one
-folder; each `wrb` invocation opens the service with that shell's current
-directory as the browse root.
+The command stops any old WRB service on the configured port, starts a fresh
+background service, and returns the shell, similar to `wsh view .`.
 
-In a local Wave shell, `wrb` listens on `127.0.0.1` with a random port.
+In a local Wave shell, `wrb` listens on:
+
+```text
+127.0.0.1:17876
+```
 
 In a Wave remote shell, detected by `WAVETERM_CONN`, `wrb` automatically switches to remote mode:
 
@@ -46,7 +48,7 @@ You can override network settings:
 
 ```bash
 wrb --remote --host 0.0.0.0 --port 17876 --public-host 192.168.1.20
-wrb --local --port 0
+wrb --local --port 17877
 ```
 
 For local testing without opening Wave:
