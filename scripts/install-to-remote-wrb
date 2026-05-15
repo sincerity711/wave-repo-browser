@@ -77,8 +77,10 @@ cd "$repo_dir"
 mkdir -p dist
 bun run embed
 bun build src/main.mjs --compile --target="$target" --outfile "$outfile"
+zsh scripts/copy-monaco-assets
 
 remote_tmp="/tmp/wrb-bin-$RANDOM-$$"
+remote_assets_tmp="/tmp/wrb-monaco-$RANDOM-$$"
 remote_bin_dir="${WRB_REMOTE_BIN_DIR:-\$HOME/.local/bin}"
 remote_install_root="${WRB_REMOTE_INSTALL_ROOT:-\$HOME/.local/share/wave-repo-browser}"
 public_host="${WRB_PUBLIC_HOST:-}"
@@ -89,10 +91,12 @@ fi
 
 echo "Copying $outfile to $remote:$remote_tmp"
 scp "$outfile" "$remote:$remote_tmp"
+echo "Copying Monaco assets to $remote:$remote_assets_tmp"
+tar -C "$repo_dir/dist" -czf - monaco-editor | ssh "$remote" "mkdir -p '$remote_assets_tmp' && tar -C '$remote_assets_tmp' -xzf -"
 
 echo "Installing on $remote"
 ssh "$remote" \
-  "WRB_REMOTE_TMP='$remote_tmp' WRB_REMOTE_BIN_DIR='$remote_bin_dir' WRB_REMOTE_INSTALL_ROOT='$remote_install_root' WRB_PUBLIC_HOST='$public_host' bash -s" <<'EOF'
+  "WRB_REMOTE_TMP='$remote_tmp' WRB_REMOTE_ASSETS_TMP='$remote_assets_tmp' WRB_REMOTE_BIN_DIR='$remote_bin_dir' WRB_REMOTE_INSTALL_ROOT='$remote_install_root' WRB_PUBLIC_HOST='$public_host' bash -s" <<'EOF'
 set -euo pipefail
 
 bin_dir="$(eval echo "$WRB_REMOTE_BIN_DIR")"
@@ -100,7 +104,10 @@ install_root="$(eval echo "$WRB_REMOTE_INSTALL_ROOT")"
 config_dir="$HOME/.config/wave-repo-browser"
 
 mkdir -p "$bin_dir" "$install_root/bin" "$config_dir"
+rm -rf "$install_root/monaco-editor"
 mv "$WRB_REMOTE_TMP" "$install_root/bin/wrb-bin"
+mv "$WRB_REMOTE_ASSETS_TMP/monaco-editor" "$install_root/monaco-editor"
+rm -rf "$WRB_REMOTE_ASSETS_TMP"
 chmod +x "$install_root/bin/wrb-bin"
 
 if [ -n "${WRB_PUBLIC_HOST:-}" ]; then

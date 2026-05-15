@@ -11,8 +11,11 @@ wrb
 ```
 
 By default it browses the current working directory and opens the Wave web block.
-The command stops any old WRB service on the configured port, starts a fresh
-background service, and returns the shell, similar to `wsh view .`.
+The command starts a background service if needed and returns the shell, similar
+to `wsh view .`. If a healthy WRB service is already running on the configured
+port, another `wrb` invocation reuses it and opens a new Wave web block for that
+terminal session. This lets multiple Wave tabs use WRB at the same time without
+invalidating earlier tabs.
 
 In a local Wave shell, `wrb` listens on:
 
@@ -76,6 +79,7 @@ Build a standalone executable:
 bun run build
 mkdir -p ~/.local/share/wave-repo-browser ~/bin
 cp dist/wrb ~/.local/share/wave-repo-browser/wrb-bin
+cp -R dist/monaco-editor ~/.local/share/wave-repo-browser/monaco-editor
 cp scripts/wrb-launcher ~/bin/wrb
 chmod +x ~/.local/share/wave-repo-browser/wrb-bin ~/bin/wrb
 ```
@@ -87,6 +91,8 @@ On this machine the command is also installed as:
 ```
 
 The UI uses VS Code's open-source `@vscode/codicons` package. The build embeds the font into `src/codicons-embedded.mjs`, so the final binary does not need `node_modules` at runtime.
+
+WRB serves Monaco editor assets under `/monaco/...`. Development runs read them from the local `monaco-editor` package. `bun run build` copies the needed Monaco files into `dist/monaco-editor`, and standalone installs must keep that directory next to the installed app.
 
 ## Remote Install
 

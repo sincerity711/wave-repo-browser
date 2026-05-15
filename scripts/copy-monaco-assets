@@ -1,0 +1,18 @@
+#!/usr/bin/env zsh
+
+set -euo pipefail
+
+script_dir="${0:A:h}"
+repo_dir="${script_dir:h}"
+source_dir="$repo_dir/node_modules/monaco-editor/min"
+target_dir="$repo_dir/dist/monaco-editor/min"
+
+if [[ ! -d "$source_dir" ]]; then
+  echo "Missing Monaco assets: $source_dir" >&2
+  echo "Run bun install before building WRB." >&2
+  exit 1
+fi
+
+rm -rf "$repo_dir/dist/monaco-editor"
+mkdir -p "$target_dir"
+cp -R "$source_dir"/. "$target_dir"/

@@ -8,12 +8,15 @@
   },
   "scripts": {
     "embed": "bun scripts/embed-codicons.mjs",
-    "build": "bun run embed && bun build src/main.mjs --compile --outfile dist/wrb",
-    "build:linux-x64": "bun run embed && bun build src/main.mjs --compile --target=bun-linux-x64 --outfile dist/wrb-linux-x64",
+    "copy-monaco": "zsh scripts/copy-monaco-assets",
+    "build": "bun run embed && bun build src/main.mjs --compile --outfile dist/wrb && bun run copy-monaco",
+    "build:linux-x64": "bun run embed && bun build src/main.mjs --compile --target=bun-linux-x64 --outfile dist/wrb-linux-x64 && bun run copy-monaco",
     "dev": "bun src/main.mjs --open",
-    "check": "node --check src/main.mjs && zsh -n scripts/wrb-dev"
+    "test": "node --test tests/*.test.mjs",
+    "check": "node --check src/main.mjs && zsh -n scripts/wrb-dev && bun run test"
   },
   "dependencies": {
-    "@vscode/codicons": "0.0.45"
+    "@vscode/codicons": "0.0.45",
+    "monaco-editor": "^0.55.1"
   }
 }
